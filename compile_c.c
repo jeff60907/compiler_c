@@ -1,13 +1,36 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <memory.h>
-#include <string>
+#include <string.h>
 
 
-int token		// current token
+int token;				// current token
 char *src, *old_src;    // pointer to code string
 int poolsize;		// default size of text/data/stack
 int line;		// line number
+
+
+int *text,		// text segment
+    *old_text,	// for dump text sgment
+    *stack;		// stack
+char *data;		// data segment
+
+
+int *pc,	// program counter
+   	*bp,	// base pointer
+	*sp,	// stack pointer
+	ax,		// general register
+	cycle;	// virtual machine registers
+
+
+// instructions  op code
+
+enum { LEA, IMM, JMP, CALL, JZ, JNZ, ENT, ADJ, LEV,	LI, LC, SI, SC, PUSH,
+	   OR,  XOR, AND, EQ, NE, LT, GT, LE, GE, SHL, SHR, ADD, SUB, MUL, DIV, MOD,
+	   OPEN, READ, CLOS, PRTF, MALC, MSET, MCMP,EXIT };
+
+
+
 
 void next() {
     token = *src++;
@@ -16,14 +39,69 @@ void next() {
 
 
 void expression(int level) {
-    next();
-    while (token > 0) {
-        printf("token is: %c\n", token);
-        next();
-    }
 } 
 
-int eval() { // do nothing yet
+void program() {
+	next();		// get next token
+	while(token > 0) {
+		printf("token is: %c\n", token);
+		next();
+	}
+}
+
+
+int eval() {
+	int op, *tmp;
+	while(1) {
+		op = *pc++;    //get next op code
+		if     (op == IMM)		{ax = *pc++;}					// load global address or immedicate
+		else if (op == LC)		{ax = *(char *)ax;}				// load char
+		else if (op == LI)		{ax = *(int *)ax;}				// load int
+		else if (op == SC)		{ax = *(char *)*sp++ = ax;}		// save char
+		else if (op == SI)		{*(int *)*sp++ = ax;}			// save int
+
+		else if (op == PUSH)	{*--sp = ax;}					// push the value of ax onto the stack
+		else if (op == JMP)		{pc = (int *)*pc;}				// jump to next address
+		else if (op == JZ)		{pc = ax ? pc+1 : (int *)*pc;}	// jump if zero
+		else if (op == JNZ)		{pc = ax ? (int*)*pc : pc+1;}	// jump if not zero
+
+		else if (op == CALL)	{*--sp = (int)(pc+1); pc = (int *)*pc;}				// call subroutine
+		else if (op == ENT)		{*--sp = (int)bp; bp = sp; sp = sp - *pc++;}		// enter subroutine
+		else if (op == ADJ)		{sp = sp + *pc++;}									// stack adjust , add esp,<size>
+		else if (op == LEV)		{sp = bp; bp = (int *)*sp++; pc = (int *)*sp++;}	// leave subroutine and restore
+		else if (op == LEA)		{ax = (int)(bp + *pc++);}							// load local address for argmuents
+
+		else if (op == OR)		ax = *sp++ | ax;
+		else if (op == XOR)		ax = *sp++ ^ ax;
+		else if (op == AND)		ax = *sp++ & ax;
+		else if (op == EQ)		ax = *sp++ == ax;
+		else if (op == NE)		ax = *sp++ != ax;
+		else if (op == LT)		ax = *sp++ < ax;
+		else if (op == LE)		ax = *sp++ <= ax;
+		else if (op == GT)		ax = *sp++ > ax;
+		else if (op == GE)		ax = *sp++ >= ax;
+		else if (op == SHL)		ax = *sp++ << ax;
+		else if (op == SHR)		ax = *sp++ >> ax;
+		else if (op == ADD)		ax = *sp++ + ax;
+		else if (op == SUB)		ax = *sp++ - ax;
+		else if (op == MUL)		ax = *sp++ * ax;
+		else if (op == DIV)		ax = *sp++ / ax;
+		else if (op == MOD)		ax = *sp++ % ax;
+
+		else if (op == EXIT)	{printf("exit(%d)", *sp); return *sp;}
+		else if (op == OPEN)	{ax = open((char *)sp[1], sp[0]);}
+		else if (op == CLOS)	{ax = close(*sp);}
+		else if (op == READ)	{ax = read(sp[2], (char *)sp[1], *sp);}
+		else if (op == PRTF)	{tmp = sp + pc[1]; ax = printf((char *)tmp[-1], tmp[-2], tmp[-3], tmp[-4], tmp[-5], tmp[-6]);}
+		else if (op == MALC)	{ax = (int)malloc(*sp);}
+		else if (op == MSET)	{ax = (int)memset((char *)sp[2], sp[1], *sp);}
+		else if (op == MCMP)	{ax = memcmp((char *)sp[2], (char *)sp[1], *sp);}
+
+		else {
+			printf("unknown instruction:%d\n", op);
+			return -1;
+		}
+	}
     return 0;
 }
 
@@ -47,18 +125,51 @@ int main(int argc, char **argv)
         return -1;
     }
 
-    // read the sourc  file
-    if ((i == read(fd, src, poolsize-1)) <= 0) {
+    // read the source  file
+    if ((i = read(fd, src, poolsize-1)) <= 0) {
         printf("read() returned %d\n", i);
         return -1;
     }
     src[i] = 0;   // add EOF character
     close(fd);
 
+	// allocate mem for virtual machine
+	if(!(text = old_text = malloc(poolsize))) {
+		printf("coud not malloc(%d) for text area\n", poolsize);
+		return -1;
+	}
+	if(!(data = malloc(poolsize))) {
+		printf("coud not malloc(%d) for data area\n", poolsize);
+		return -1;
+	}
+	if(!(stack = malloc(poolsize))) {
+		printf("could not malloc(%d) for stack area\n", poolsize);
+		return -1;
+	}
+
+	memset(text, 0, poolsize);
+	memset(data, 0, poolsize);
+	memset(stack, 0, poolsize);
+
+	bp = sp = (int *)((long)stack + poolsize);    // for 64 bit
+
+	/* ### test code  ### */
+	ax = 0;	
+	i = 0;
+	text[i++] = IMM;
+	text[i++] = 10;
+	text[i++] = PUSH;
+	text[i++] = IMM;
+	text[i++] = 20;
+	text[i++] = ADD;
+	text[i++] = PUSH;
+	text[i++] = EXIT;
+	pc = text;
+	/* ### test code  ###*/
     program();
     return eval();
 }
 
 
-
+	
 
